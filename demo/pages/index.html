@@ -1,0 +1,7 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>CORS Hunter 本地验证</title>
+<style>body{font:18px system-ui;max-width:800px;margin:60px auto;line-height:1.7}</style>
+<h1>CORS Hunter 本地验证</h1>
+<p>请按靶场启动输出中的 API 地址访问 /api/reflect。README 示例使用 18000/18001，脚本默认使用 8000/8001。先让请求经过 Burp，并将 API 加入 Target scope。</p>
+<p>在插件中选中结果，点击 Export browser check，把 HTML 保存到当前 demo/pages 目录。例如命名为 check.html，再访问 <a href="check.html">check.html</a>。</p>
+<p>本机两个不同端口属于不同 Origin，但相同 site。这个实验用于验证跨 Origin 读取流程，不能代替真实跨 site Cookie 条件验证。</p>
+<p>所有 API 数据均为本地假数据，服务仅监听 127.0.0.1。</p></html>

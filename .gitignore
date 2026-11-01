@@ -1,0 +1,14 @@
+/build/
+/target/
+/lib/
+__pycache__/
+*.py[cod]
+*.class
+*.log
+/demo/pages/*
+!/demo/pages/index.html
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db

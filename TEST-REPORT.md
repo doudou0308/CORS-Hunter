@@ -1,53 +1,39 @@
-# 本地验证记录
+# 1.0.2 测试版验证记录
 
 日期：2026-11-01
 
-## 环境与构建
+## 自动化环境与结果
 
-- OpenJDK 17.0.20；通过其 javac 模块使用 `--release 8` 编译。
-- 官方 Maven 发布：burp-extender-api 2.3，SHA-256 `0b9b16048e1a3d10bb8f36219bb7dfa637dad2d54e116199d3506b4174518e54`。
-- Python 3 构建脚本；Node.js 24.22.1 用于导出页面脚本模拟。
-- 实际执行 `python3 build.py --test` 与 `node tests/browser_check_test.js`。
+- OpenJDK 17.0.20，以 `--release 8` 编译扩展；Python 3 构建，Node.js 24.22.1 验证导出页脚本。
+- legacy Extender API 2.3，provided 依赖，不打包到扩展。
+- `python3 build.py --test`：**103 个 Java 断言通过**。
+- `node tests/browser_check_test.js`：普通 fetch、sandbox 和消息回传模拟通过；不是浏览器 CORS 实测。
 
-## 1.0.1 故障复现与回归
+## 启动窗口复现与修复
 
-使用截图对应的导航头形态（Sec-Fetch-Mode: navigate、长 Accept、Upgrade-Insecure-Requests、Cache-Control、Pragma）在 1.0.0 上复现失败断言：插件只发送 OPTIONS，实际 GET 被阻止。修复后直接发送调整后的 fetch GET，并显式注明表示可能变化。
+先阻塞测试 EDT，让扩展注册回调。在 1.0.1 上新增断言失败：`HTTP listener must register before EDT initialization finishes`，证实 HTTP listener 注册依赖 UI 初始化完成。
 
-新增正反例覆盖：开启/关闭导航变体、非导航长 Accept 保持严格预检、自定义业务头仍被预检限制、Authorization 仍需预检且实际保留、PoC 不回填导航 Accept 且不泄露认证。
+1.0.2 同步注册 HTTP listener。测试在注册回调内投递唯一一个外部响应，让两次探测在 UI 初始化入队前完成；解除 EDT 阻塞后，两条结果正常显示，无需刷新。另一个场景在 UI 已就绪后投递首次响应，也只触发两次默认探测。探测回流计数为 SELF，不会递归。
 
-## 结果
+此复现证明一个实际代码缺陷，不证明维护者报告的每个“首次不出、刷新才出”都与启动窗口同因；特别是 UI 早已就绪后的异常，需要实机诊断计数和请求证据继续定位。
 
-Java 回归：**83 个断言通过**。覆盖：
+## 回归范围
 
-- 精确 ACAO/ACAC、前后缀误匹配、大小写、重复 ACAO、凭证模式不接受通配符。
-- null Origin、匿名通配符、预检状态/方法/请求头，Authorization 不被通配符替代。
-- 简单请求头分类、Range 分类、字节正文截取和二进制 POST 原样构造。
-- Transfer-Encoding 请求拒绝重放，避免把 chunk framing 当作实体正文。
-- scope、自动写操作限制、标记头、防重复任务、issue 合并。
-- 预检失败只发送 OPTIONS，无 Cookie，阻止业务请求重放。
-- 请求暂停后不继续下一 Origin；队列 64 的溢出拒绝与卸载清队列。
-- 127.0.0.1 临时 HTTP 服务的真实网络请求及结果判定。
-- 无图形环境下初始化 Swing；消息查看器真实 service/request 上下文；Repeater 调用与编号。
-- CSV 危险前缀、含换行的公式、JS 字符串转义、Origin 格式验证。
+- 保留原 1.0.1 的 CORS 精确匹配、ACAC 大小写、重复 ACAO、凭证通配符、预检和 Authorization 规则。
+- 原始字节正文、导航变体、自定义业务头、CSV/HTML/JS 转义、PoC 不导出认证。
+- 本地 loopback HTTP 请求；暂停、队列预算、卸载、Scope、防递归、去重及 Repeater。
+- 新增 received/SELF/QUEUED/SCOPE/DUPLICATE/AUTO_OFF/PAUSED/WRITE_BLOCKED 计数、卸载后停止观察、诊断不含认证。
+- Scope 拒绝不会污染去重；同一请求在满足 Scope 后可入队；写操作仍不能自动重放。
+- Swing 初始化、缓冲结果显示和消息编辑器更新在 EDT；状态更新通过 invokeLater。
 
-浏览器复核页 JavaScript：语法、普通 fetch 模拟、sandbox srcdoc 脚本、postMessage 来源及结果回传均通过。测试也检查自定义头内的 `<` 不被改变。未使用真实浏览器验证 CORS 执行。
+## 维护者已经反馈的实机结果（1.0.1）
 
-本地 demo：使用 loopback HTTP 客户端核对 reflect / strict / null / wildcard / invalid / duplicate / preflight-denied 响应特征（见打包时验证输出）。
+Burp Suite Professional 2025.7 / Java 24 下，本地 reflect 正例和 strict 反例已反馈；Web Security Academy 基础 Origin 反射靶场出现 random/null CREDENTIAL_POLICY。更换靶场实例后，从本地复核页实际读取了当前账户的用户名、邮箱、API key 等响应内容。
 
-打包校验：`burp/BurpExtender.class` 入口存在；不包含 Burp API 接口类或测试类；全部扩展 class 为 Java 8 字节码（major 52）。
+以上只说明特定版本、账户和浏览器条件下链路成立，不证明所有 Cookie 策略均可通过。旧实例失效是此前复核失败的合理解释，未将其记录为最终证实的根因。仓库不包含个人环境截图或会话值。
 
-## 维护者本机反馈
+## 尚待验证
 
-维护者在 **Burp Suite Professional 2025.7 / Java 24** 环境反馈 1.0.1 可加载、本地 reflect 接口出现 CREDENTIAL_POLICY；通过 18001 复核页读取 18000 的 reflect 接口，得到 HTTP 200 和 `cookie_received: true`，strict 接口复核则未能读取。证据来源为维护者提交的截图及结果文本，未将个人环境截图纳入开源仓库。
+**1.0.2 尚未在维护者的 Burp 2025.7 / Java 24 中实际加载。** 自动化测试使用 Burp API 替身，不能覆盖实际 HTTP/2、其他扩展、项目 session/macro、超时、所有 UI 操作和浏览器策略。
 
-这覆盖了本地基础检测与浏览器读取链路，不是完整兼容性认证。18000 和 18001 跨 Origin 但同 site，不证明跨 site Cookie 限制被绕过。
-
-## 仍待验证
-
-本地测试替身不能覆盖 Burp 的消息标准化、项目级 session/macro、HTTP/2、其他扩展、所有 UI 操作与网络超时行为。
-
-也未验证真实站点的 Cookie / SameSite、浏览器第三方 Cookie 策略、浏览器预检缓存及数据敏感性。README 提供本地安装、假数据靶场和浏览器复核步骤。自动结果和 issue 都不代表漏洞已确认。
-
-## 开源发布准备检查
-
-再次运行 Java 83 断言及导出页 JavaScript 测试通过。重构建 JAR 的各 ZIP 条目内容与原 1.0.1 安装包完全一致，发布保留原 JAR 及 SHA-256；构建的 ZIP 时间戳不同不会被误记为功能变更。打包仅包含项目源码、测试、文档、loopback 靶场和当前安装包，不包含 API 依赖、构建中间文件、浏览器导出记录或个人截图。
+本版保留 legacy API 单次请求超时/取消的限制，不新增浏览器自动执行或历史自动补扫。

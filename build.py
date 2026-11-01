@@ -46,9 +46,9 @@ def main():
              '-cp', cp + os.pathsep + str(tests), 'RegressionTest'])
     dist = ROOT / 'dist'
     dist.mkdir(exist_ok=True)
-    jar = dist / 'CORS-Hunter-1.0.1.jar'
+    jar = dist / 'CORS-Hunter-1.0.2.jar'
     with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nImplementation-Title: CORS Hunter\r\nImplementation-Version: 1.0.1\r\n\r\n')
+        z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nImplementation-Title: CORS Hunter\r\nImplementation-Version: 1.0.2\r\n\r\n')
         for package in ('burp', 'hunter'):
             for file in sorted((out / package).rglob('*.class')):
                 z.write(file, file.relative_to(out).as_posix())

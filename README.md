@@ -4,11 +4,11 @@
 
 从经过 Burp 的流量中生成独立探测请求，检查 Origin、凭证许可和必要的预检条件，再通过浏览器复核实际读取能力。
 
-![Version](https://img.shields.io/badge/version-1.0.1-blue)
+![Version](https://img.shields.io/badge/version-1.0.2-orange)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 ![API](https://img.shields.io/badge/Burp_API-legacy_Extender-orange)
 
-**[下载插件 JAR](https://github.com/doudou0308/CORS-Hunter/raw/refs/heads/main/dist/CORS-Hunter-1.0.1.jar)** · **[下载完整项目 ZIP](https://github.com/doudou0308/CORS-Hunter/archive/refs/heads/main.zip)** · [校验文件](SHA256SUMS.txt) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/doudou0308/CORS-Hunter/issues)
+**[下载插件 JAR](dist/CORS-Hunter-1.0.2.jar?raw=true)** · **[下载完整项目 ZIP](https://github.com/doudou0308/CORS-Hunter/archive/refs/heads/fix/first-response-1.0.2.zip)** · [校验文件](SHA256SUMS.txt) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/doudou0308/CORS-Hunter/issues)
 
 [安装](#安装) · [控件说明](#控件) · [结果判读](#判定) · [本地靶场](#local-demo) · [源码构建](#源码与构建) · [常见问题](#常见问题) · [许可与来源](#许可与来源)
 
@@ -30,25 +30,46 @@
 
 | 项目 | 说明 |
 | --- | --- |
-| 当前版本 | **1.0.1**；修复导航请求头引起的错误预检，增加 Navigation -> fetch 开关 |
+| 当前版本 | **1.0.2 测试版**；修复启动期监听窗口，增加自动入队诊断；待 Burp 实机验证 |
 | 安装方式 | **Java 扩展，无需 Jython**；JAR 不包含 Burp API 类或第三方运行依赖 |
-| 本机反馈 | Burp Suite Professional 2025.7 / Java 24；本地 reflect 正例、strict 反例及携带测试 Cookie 的浏览器读取链路已反馈通过 |
-| 自动化验证 | OpenJDK 17 编译为 Java 8 字节码；83 个 Java 回归断言及导出页 JavaScript 模拟测试通过 |
+| 1.0.1 本机反馈 | Burp Suite Professional 2025.7 / Java 24；本地 reflect 正例、strict 反例及携带测试 Cookie 的浏览器读取链路已反馈通过 |
+| 自动化验证 | OpenJDK 17 编译为 Java 8 字节码；103 个 Java 回归断言及导出页 JavaScript 模拟测试通过 |
 | 验证边界 | 本地同 site、跨 Origin 测试不代表跨 site Cookie 策略或所有真实业务均已验证；详见 [验证记录](TEST-REPORT.md) |
 
 首次使用建议按下方步骤安装，再运行[本地靶场](#local-demo)。只需安装插件时下载 JAR；需要靶场、测试和源码时下载完整项目 ZIP。
 
 ## 安装
 
-先[下载 CORS-Hunter-1.0.1.jar](https://github.com/doudou0308/CORS-Hunter/raw/refs/heads/main/dist/CORS-Hunter-1.0.1.jar)，然后：
+先[下载 CORS-Hunter-1.0.2.jar](dist/CORS-Hunter-1.0.2.jar?raw=true)，然后：
 
 1. 停用旧 CORSScanner，以免两个插件同时重复请求。
 2. 打开 Burp **Extensions → Installed → Add**。
-3. Extension type 选择 **Java**，选择 `dist/CORS-Hunter-1.0.1.jar`，然后 Next。
-4. Output 出现 `CORS Hunter 1.0.1 loaded`，主界面出现 **CORS Hunter** 标签页。
+3. Extension type 选择 **Java**，选择 `dist/CORS-Hunter-1.0.2.jar`，然后 Next。
+4. Output 出现 `CORS Hunter 1.0.2 loaded`，主界面出现 **CORS Hunter** 标签页。
 5. 在 Burp **Target → Scope** 中加入授权测试目标。插件默认只自动检测 scope 内的 GET/HEAD，流量经过 Proxy、Repeater 等工具即可触发，不要求额外配置 Scanner live audit。
 
 若加载失败：查看该扩展 Errors，把完整报错和 Burp / Java 版本发回。不要将 API 依赖 JAR 作为扩展安装。
+
+## 1.0.2 首次响应修复与诊断
+
+1.0.1 在 EDT 完成界面初始化后才注册 HTTP listener，启动期间存在漏收首次响应的窗口。1.0.2 改为同步注册监听，界面继续通过 `SwingUtilities.invokeLater` 初始化；先完成的结果使用现有 128 个 UI 槽位有界暂存，界面就绪后显示。
+
+这修复了可复现的启动时序缺陷，**尚不能认定维护者报告的“界面已就绪，首次仍不出、刷新才出”完全由它造成**。测试版为该场景补充底部诊断：
+
+| 字段 | 含义 |
+| --- | --- |
+| `received` | 收到的响应回调总数，包含自身探测回流；请求阶段不计入 |
+| `self` | 被标记头识别并跳过的插件探测响应 |
+| `autoQueued` | 自动扫描成功入队次数 |
+| `scopeSkipped` | 因不在 Scope 而跳过的次数 |
+| `dedupSkipped` | 因已排队或已检测而跳过的次数 |
+| `last` | 最近一次外部响应的入队决策码及中文解释，附 toolFlag；不是扫描结果 |
+
+将鼠标放在诊断行上可查看各类决策计数，包括 AUTO_OFF、PAUSED、REQUEST_LIMIT、RESPONSE_LIMIT、DESTINATION、QUEUE_FULL、ERROR。计数是扩展本次加载期间累计值，Reset dedup/budget 不清除它们；所有工具的流量都会影响计数，`last` 可能被后续流量覆盖。诊断不附 Cookie、Token、query 或正文。
+
+验收首次访问：先配置 Scope 并加载扩展，随后只进入账户页一次，不刷新，等待后台处理；同时检查 `received`、`autoQueued`、`sent/queued/active` 和 `last`。若问题仍出现，请保留这些计数、扩展 Errors 和对应首次请求/响应信息，以区分未收到回调、入队拒绝、请求失败与 UI 显示问题。
+
+本版不自动补扫历史、不绕过 Scope、不添加自动写操作，也不重试可能有副作用的请求。
 
 ## 1.0.1 导航请求修复
 
@@ -58,7 +79,7 @@
 
 这是变体探测，不是原始导航的完全等价重放；Accept/缓存变化可能改变响应内容。结果 Reason 会注明，点击行时底部可直接查看。关闭该选项可恢复严格原头模式，随后用 Rescan selected 重新扫描。浏览器复核页优先采用实际 probe 的头，不再重新带回导航 Accept。
 
-升级：移除旧插件，加载 1.0.1 JAR，保持 scope、Auto GET/HEAD、Navigation -> fetch 勾选，刷新 reflect 接口。已有靶场可以继续运行，无须重启。
+升级：移除旧插件，加载当前 JAR，保持 scope、Auto GET/HEAD、Navigation -> fetch 勾选，刷新 reflect 接口。已有靶场可以继续运行，无须重启。
 
 ## 这版已实现
 
@@ -163,7 +184,7 @@ python demo\demo_server.py --api-port 18000 --page-port 18001
 python build.py --test
 ```
 
-脚本会下载并校验固定版本 API 依赖，编译、运行 Java 回归测试，再生成 `dist/CORS-Hunter-1.0.1.jar`。如果无法下载，将对应依赖手动放到 `lib/burp-extender-api-2.3.jar` 后重试；校验不匹配时不会编译。
+脚本会下载并校验固定版本 API 依赖，编译、运行 Java 回归测试，再生成 `dist/CORS-Hunter-1.0.2.jar`。如果无法下载，将对应依赖手动放到 `lib/burp-extender-api-2.3.jar` 后重试；校验不匹配时不会编译。
 
 可选：有 Node.js 时运行 `node tests/browser_check_test.js` 检查导出页面脚本的普通 fetch、sandbox 和消息回传模拟路径（先运行上述 Java 测试生成页面）。这不是浏览器 CORS 实测。
 
@@ -172,7 +193,7 @@ python build.py --test
 
 ## 常见问题
 
-- **访问接口后没有结果**：确认 Auto GET/HEAD 已开启、插件未暂停、URL 在 Target Scope 内，且流量实际经过 Burp。相同原始请求可能已去重；可手动重扫，或空闲时 Reset dedup/budget。查看扩展 Errors 与底部状态。
+- **访问接口后没有结果**：先看底部 `received / autoQueued / last`；再确认 Auto GET/HEAD 已开启、插件未暂停、URL 在 Target Scope 内，且流量实际经过 Burp。相同原始请求可能已去重；可手动重扫，或空闲时 Reset dedup/budget。查看扩展 Errors 与底部状态。
 - **HTTP 为 0、结果为 ERROR**：不是 CORS 判定。检查靶场进程、端口、目标服务及 Errors；先确认同一个请求在 Repeater 中能正常收到响应。
 - **PREFLIGHT_BLOCKED 显示 204**：204 是 OPTIONS 的响应状态，不表示 CORS 许可通过；需检查 Preflight Request/Response 及 Reason。
 - **浏览器 Failed to fetch**：可能是预期的 CORS 拦截，也可能是网络、TLS、Cookie 或其他浏览器限制；用 DevTools 的 Network/Console 核对，不能直接认定安全。

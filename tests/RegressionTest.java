@@ -48,7 +48,7 @@ public class RegressionTest {
         final List<String> errors=new CopyOnWriteArrayList<String>();
         final List<Object[]> repeaters=new CopyOnWriteArrayList<Object[]>();
         boolean scope=true;volatile BiFunction<IHttpService,byte[],byte[]> backend;
-        IHttpListener listener;Engine engine;
+        volatile IHttpListener listener;Engine engine;Consumer<IHttpListener> onRegister;
         Harness(){backend=(s,r)->{String origin=Policy.one(Policy.headers(headers(r)),"origin");return response(200,"Access-Control-Allow-Origin: "+origin,"Access-Control-Allow-Credentials: true","Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE","Access-Control-Allow-Headers: authorization, content-type, x-test");};}
         final IBurpExtenderCallbacks callbacks=proxy(IBurpExtenderCallbacks.class,(o,m,a)->{
             switch(m.getName()) {
@@ -58,7 +58,8 @@ public class RegressionTest {
                 case "printError":errors.add(String.valueOf(a[0]));return null;
                 case "makeHttpRequest":{IHttpService s=(IHttpService)a[0];byte[] req=(byte[])a[1];sent.add(req);byte[] res=backend.apply(s,req);Message result=new Message(s,req,res);if(listener!=null)listener.processHttpMessage(1024,false,result);return result;}
                 case "addScanIssue":issues.add((IScanIssue)a[0]);return null;
-                case "registerHttpListener":listener=(IHttpListener)a[0];return null;
+                case "registerHttpListener":listener=(IHttpListener)a[0];if(onRegister!=null)onRegister.accept(listener);return null;
+                case "removeHttpListener":listener=null;return null;
                 case "sendToRepeater":repeaters.add(a);return null;
                 case "createMessageEditor":{
                     controllers.add((IMessageEditorController)a[0]);JPanel component=new JPanel();
@@ -176,6 +177,11 @@ public class RegressionTest {
     }
     static void uiTests()throws Exception {
         Harness h=new Harness();BurpExtender ext=new BurpExtender();ext.registerExtenderCallbacks(h.callbacks);SwingUtilities.invokeAndWait(()->{});
+        Field engineField=BurpExtender.class.getDeclaredField("engine");engineField.setAccessible(true);
+        h.engine=(Engine)engineField.get(ext);h.engine.intervalMillis=1;
+        h.listener.processHttpMessage(IBurpExtenderCallbacks.TOOL_PROXY,false,h.base("GET","Accept: application/json",null,8080));
+        waitForIdle(h);SwingUtilities.invokeAndWait(()->{});
+        ok(h.engine.intakeCount(Engine.IntakeCode.QUEUED)==1&&h.sent.size()==2,"first response after UI readiness scans without refreshing");
         Message original=h.base("GET","Accept: application/json",null,8080),probe=new Message(original.getHttpService(),original.getRequest(),response(200));
         Finding f=new Finding(original,probe,null,new URL("http://127.0.0.1:8080/api?a=1"),"GET","http://fixture.invalid","random","CREDENTIAL_POLICY","fixture",200,"","");
         Field selected=BurpExtender.class.getDeclaredField("selected");selected.setAccessible(true);selected.set(ext,f);
@@ -185,5 +191,60 @@ public class RegressionTest {
         ok(h.repeaters.size()==1&&h.repeaters.get(0)[4].equals("CORS-1"),"Repeater caption and call");
         ext.extensionUnloaded();SwingUtilities.invokeAndWait(()->{});ok(h.errors.isEmpty(),"UI no initialization errors");
     }
-    public static void main(String[] args)throws Exception{policyTests();engineTests();navigationTests();localHttpTests();uiTests();System.out.println("PASS: "+assertions+" assertions; strict policy, binary requests, preflight, dedup, pause, local HTTP, EDT/controller/Repeater. Burp runtime not tested.");}
+    static void waitForIdle(Harness h)throws Exception {
+        long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);
+        while(System.nanoTime()<deadline){if(h.sent.size()==2&&h.engine.active()==0&&h.engine.queued()==0)return;Thread.sleep(5);}
+        throw new AssertionError("first response scan did not complete");
+    }
+    static void firstResponseTests()throws Exception {
+        CountDownLatch entered=new CountDownLatch(1),release=new CountDownLatch(1);
+        SwingUtilities.invokeLater(()->{entered.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException ex){Thread.currentThread().interrupt();}});
+        ok(entered.await(2,TimeUnit.SECONDS),"EDT held to reproduce startup window");
+        Harness h=new Harness();BurpExtender ext=new BurpExtender();
+        Field engineField=BurpExtender.class.getDeclaredField("engine");engineField.setAccessible(true);
+        // Deliver a response during listener registration, before UI initialization is even queued.
+        h.onRegister=listener->{try {
+            h.engine=(Engine)engineField.get(ext);h.engine.intervalMillis=1;
+            listener.processHttpMessage(IBurpExtenderCallbacks.TOOL_PROXY,false,h.base("GET","Accept: application/json",null,8080));
+            waitForIdle(h);
+        }catch(Exception ex){throw new RuntimeException(ex);}};
+        boolean registered;
+        try {ext.registerExtenderCallbacks(h.callbacks);registered=h.listener!=null;}
+        finally {release.countDown();}
+        SwingUtilities.invokeAndWait(()->{});
+        try {
+            ok(registered,"HTTP listener must register before EDT initialization finishes");
+            ok(h.sent.size()==2&&h.issues.size()==1,"one first response produces two probes without refreshing");
+            Field modelField=BurpExtender.class.getDeclaredField("model");modelField.setAccessible(true);
+            SwingUtilities.invokeAndWait(()->{try{ok(((javax.swing.table.DefaultTableModel)modelField.get(ext)).getRowCount()==2,"results completed before UI are displayed after initialization");}catch(IllegalAccessException ex){throw new RuntimeException(ex);}});
+            ok(h.engine.intakeCount(Engine.IntakeCode.SELF)==2,"startup probes re-enter listener but do not recurse");
+            ok(h.engine.intakeCount(Engine.IntakeCode.QUEUED)==1,"first external response was queued exactly once");
+            ok(h.errors.isEmpty(),"first response and buffered results have no initialization error");
+        } finally {ext.extensionUnloaded();SwingUtilities.invokeAndWait(()->{});}
+        ok(h.listener==null,"HTTP listener removed on unload");
+    }
+    static void intakeTests()throws Exception {
+        Harness h=new Harness();Engine e=h.start();h.listener=e::observe;
+        Message base=h.base("GET","Accept: application/json",null,8080);
+        e.observe(IBurpExtenderCallbacks.TOOL_PROXY,true,base);
+        ok(e.received.get()==0,"request-side callbacks are not counted as responses");
+        h.scope=false;e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);
+        ok(h.sent.isEmpty()&&e.tracked()==0&&e.intakeCount(Engine.IntakeCode.SCOPE)==1,"out-of-scope is visible and never marks dedup");
+        h.scope=true;e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);h.await();
+        ok(h.sent.size()==2&&h.rows.size()==2,"same first response can be queued after scope becomes eligible");
+        ok(e.received.get()==4&&e.intakeCount(Engine.IntakeCode.SELF)==2,"external and recursive callbacks counted separately");
+        e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);
+        ok(e.intakeCount(Engine.IntakeCode.DUPLICATE)==1&&h.sent.size()==2,"diagnostics do not bypass dedup");
+        e.automatic=false;e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);
+        ok(e.intakeCount(Engine.IntakeCode.AUTO_OFF)==1,"automatic-off reason visible");e.automatic=true;
+        e.pause();e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);
+        ok(e.intakeCount(Engine.IntakeCode.PAUSED)==1,"paused reason visible");e.resume();
+        e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,h.base("POST","Content-Type: application/json",new byte[]{1},8080));
+        ok(e.intakeCount(Engine.IntakeCode.WRITE_BLOCKED)==1&&h.sent.size()==2,"diagnostics do not introduce automatic writes");
+        ok(e.intakeStatus().contains("scopeSkipped=1")&&e.intakeDetails().contains("WRITE_BLOCKED"),"intake counters available to UI");
+        ok(!e.intakeStatus().contains("session=fixture")&&!e.intakeDetails().contains("session=fixture"),"diagnostics exclude request authentication");
+        int observed=e.received.get();e.close();e.observe(IBurpExtenderCallbacks.TOOL_PROXY,false,base);
+        ok(e.received.get()==observed&&h.sent.size()==2,"unloaded listener cannot schedule more work");
+    }
+    public static void main(String[] args)throws Exception{firstResponseTests();intakeTests();policyTests();engineTests();navigationTests();localHttpTests();uiTests();System.out.println("PASS: "+assertions+" assertions; strict policy, binary requests, preflight, dedup, pause, local HTTP, EDT/controller/Repeater. Burp runtime not tested.");}
 }

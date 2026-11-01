@@ -16,6 +16,21 @@ public final class Engine {
     public volatile String customOrigin="";
     public final AtomicBoolean unloaded=new AtomicBoolean(false), paused=new AtomicBoolean(false);
     public final AtomicInteger sent=new AtomicInteger(), dropped=new AtomicInteger(), completed=new AtomicInteger();
+    public enum IntakeCode {
+        QUEUED("已入队"), SELF("插件自身响应"), AUTO_OFF("自动检测已关闭"), PAUSED("暂停中"),
+        REQUEST_LIMIT("请求为空或过大"), RESPONSE_LIMIT("原始响应过大"), NO_SERVICE("缺少 HTTP service"),
+        TRANSFER_ENCODING("不重放 Transfer-Encoding"), METHOD("不支持的方法"), WRITE_BLOCKED("自动模式不重放写操作"),
+        GET_BODY("GET/HEAD 带正文"), DESTINATION("URL 与 HTTP service 不一致"), SCOPE("不在 Scope"),
+        DUPLICATE("已排队或已检测"), CONTEXT_BUDGET("上下文预算已满"), QUEUE_FULL("队列已满"), ERROR("入队异常，查看 Errors");
+        public final String label;IntakeCode(String label){this.label=label;}
+    }
+    private static final class IntakeResult {
+        final IntakeCode code;final String detail;
+        IntakeResult(IntakeCode code,String detail){this.code=code;this.detail=detail;}
+    }
+    public final AtomicInteger received=new AtomicInteger();
+    private final EnumMap<IntakeCode,AtomicInteger> intakeCounts=new EnumMap<IntakeCode,AtomicInteger>(IntakeCode.class);
+    private final AtomicReference<String> lastIntake=new AtomicReference<String>("等待新的 HTTP 响应");
     private final AtomicInteger generation=new AtomicInteger();
     private final IBurpExtenderCallbacks cb;
     private final IExtensionHelpers helpers;
@@ -29,6 +44,7 @@ public final class Engine {
     private final String tag=UUID.randomUUID().toString();
     public Engine(IBurpExtenderCallbacks cb,Consumer<Finding> sink) {
         this.cb=cb;this.helpers=cb.getHelpers();this.sink=sink;
+        for(IntakeCode code:IntakeCode.values())intakeCounts.put(code,new AtomicInteger());
         executor=new ThreadPoolExecutor(1,1,0,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(64),r->{
             Thread t=new Thread(r,"CORS-Hunter-worker");t.setDaemon(true);return t;
         },new ThreadPoolExecutor.AbortPolicy());
@@ -45,34 +61,65 @@ public final class Engine {
         return false;
     }
     public String offer(IHttpRequestResponse source,boolean manual,boolean allowWrite) {
-        if(unloaded.get()||paused.get()) return "任务已暂停；先点击 Resume";
+        return evaluateOffer(source,manual,allowWrite).detail;
+    }
+    /** Observe response callbacks without touching Swing; probe callbacks are counted, never replayed. */
+    public void observe(int tool,boolean request,IHttpRequestResponse source) {
+        if(request||unloaded.get())return;
+        received.incrementAndGet();
+        try {
+            byte[] raw=source==null?null:source.getRequest();
+            IHttpService service=source==null?null:source.getHttpService();
+            if(raw!=null&&raw.length<=MAX_REQUEST&&service!=null&&own(raw,service)) {
+                intakeCounts.get(IntakeCode.SELF).incrementAndGet();return;
+            }
+            IntakeResult result=automatic?evaluateOffer(source,false,false):new IntakeResult(IntakeCode.AUTO_OFF,"Auto GET/HEAD 已关闭");
+            intakeCounts.get(result.code).incrementAndGet();
+            // Fixed reason codes only: no Cookie, token, query or response body in automatic diagnostics.
+            lastIntake.set("tool="+tool+" "+result.code+"（"+result.code.label+"）");
+        } catch(Exception e) {
+            intakeCounts.get(IntakeCode.ERROR).incrementAndGet();lastIntake.set("tool="+tool+" ERROR");error(e);
+        }
+    }
+    public int intakeCount(IntakeCode code){return intakeCounts.get(code).get();}
+    public String intakeStatus() {
+        return "received="+received.get()+" self="+intakeCount(IntakeCode.SELF)+" autoQueued="+intakeCount(IntakeCode.QUEUED)+
+            " scopeSkipped="+intakeCount(IntakeCode.SCOPE)+" dedupSkipped="+intakeCount(IntakeCode.DUPLICATE)+" | last="+lastIntake.get();
+    }
+    public String intakeDetails() {
+        StringBuilder out=new StringBuilder("自动监听决策计数：");
+        for(IntakeCode code:IntakeCode.values())if(intakeCount(code)>0)out.append(code).append('（').append(code.label).append("）=").append(intakeCount(code)).append(' ');
+        return out.toString();
+    }
+    private IntakeResult evaluateOffer(IHttpRequestResponse source,boolean manual,boolean allowWrite) {
+        if(unloaded.get()||paused.get()) return new IntakeResult(IntakeCode.PAUSED,"任务已暂停；先点击 Resume");
         try {
             byte[] req=source.getRequest(),res=source.getResponse();
-            if(req==null||req.length>MAX_REQUEST) return "请求为空或超过 64 KiB";
-            if(res!=null&&res.length>MAX_RESPONSE) return "原始响应超过 512 KiB；跳过以限制结果内存";
+            if(req==null||req.length>MAX_REQUEST) return new IntakeResult(IntakeCode.REQUEST_LIMIT,"请求为空或超过 64 KiB");
+            if(res!=null&&res.length>MAX_RESPONSE) return new IntakeResult(IntakeCode.RESPONSE_LIMIT,"原始响应超过 512 KiB；跳过以限制结果内存");
             IHttpService service=source.getHttpService();
-            if(service==null) return "HTTP service 为空";
-            if(own(req,service)) return "跳过插件探测请求";
+            if(service==null) return new IntakeResult(IntakeCode.NO_SERVICE,"HTTP service 为空");
+            if(own(req,service)) return new IntakeResult(IntakeCode.SELF,"跳过插件探测请求");
             IRequestInfo info=helpers.analyzeRequest(service,req);
-            if(Policy.headers(info.getHeaders()).containsKey("transfer-encoding")) return "Transfer-Encoding 请求请人工处理，避免改变正文 framing";
+            if(Policy.headers(info.getHeaders()).containsKey("transfer-encoding")) return new IntakeResult(IntakeCode.TRANSFER_ENCODING,"Transfer-Encoding 请求请人工处理，避免改变正文 framing");
             URL url=info.getUrl(); String method=info.getMethod().toUpperCase(Locale.ROOT);
-            if(!Arrays.asList("GET","HEAD","POST","PUT","PATCH","DELETE").contains(method)) return "不支持此请求方法";
-            if(!method.equals("GET")&&!method.equals("HEAD")&&(!manual||!allowWrite)) return "自动模式仅 GET/HEAD；其他方法需要手动确认";
+            if(!Arrays.asList("GET","HEAD","POST","PUT","PATCH","DELETE").contains(method)) return new IntakeResult(IntakeCode.METHOD,"不支持此请求方法");
+            if(!method.equals("GET")&&!method.equals("HEAD")&&(!manual||!allowWrite)) return new IntakeResult(IntakeCode.WRITE_BLOCKED,"自动模式仅 GET/HEAD；其他方法需要手动确认");
             byte[] body=Policy.body(req,info.getBodyOffset());
-            if((method.equals("GET")||method.equals("HEAD"))&&body.length>0) return "带正文 GET/HEAD 无法等价用于 fetch，跳过";
-            if(!destinationMatches(url,service)) return "URL 与 HTTP service 不一致，跳过";
-            if(scopeOnly&&!cb.isInScope(url)) return "不在 Burp Target scope 内";
+            if((method.equals("GET")||method.equals("HEAD"))&&body.length>0) return new IntakeResult(IntakeCode.GET_BODY,"带正文 GET/HEAD 无法等价用于 fetch，跳过");
+            if(!destinationMatches(url,service)) return new IntakeResult(IntakeCode.DESTINATION,"URL 与 HTTP service 不一致，跳过");
+            if(scopeOnly&&!cb.isInScope(url)) return new IntakeResult(IntakeCode.SCOPE,"不在 Burp Target scope 内");
             String key=fingerprint(service,url,req);
             synchronized(lock) {
-                if(pending.contains(key)||(!manual&&seen.contains(key))) return "已排队或已检测";
-                if(!seen.contains(key)&&seen.size()>=MAX_SEEN) return "已达到 3000 个请求上下文预算；可在空闲时重置";
-                if(unloaded.get()||paused.get()) return "任务已暂停";
+                if(pending.contains(key)||(!manual&&seen.contains(key))) return new IntakeResult(IntakeCode.DUPLICATE,"已排队或已检测");
+                if(!seen.contains(key)&&seen.size()>=MAX_SEEN) return new IntakeResult(IntakeCode.CONTEXT_BUDGET,"已达到 3000 个请求上下文预算；可在空闲时重置");
+                if(unloaded.get()||paused.get()) return new IntakeResult(IntakeCode.PAUSED,"任务已暂停");
                 seen.add(key);pending.add(key);
                 try {executor.execute(new Job(new Message(service,req,res),url,method,key,generation.get()));}
-                catch(RejectedExecutionException e){pending.remove(key);seen.remove(key);dropped.incrementAndGet();return "队列已满，任务未入队";}
+                catch(RejectedExecutionException e){pending.remove(key);seen.remove(key);dropped.incrementAndGet();return new IntakeResult(IntakeCode.QUEUE_FULL,"队列已满，任务未入队");}
             }
-            return "已排队："+method+" "+url.getPath();
-        } catch(Exception e){error(e);return "入队失败，查看 Extensions > Errors";}
+            return new IntakeResult(IntakeCode.QUEUED,"已排队："+method+" "+url.getPath());
+        } catch(Exception e){error(e);return new IntakeResult(IntakeCode.ERROR,"入队失败，查看 Extensions > Errors");}
     }
     private boolean destinationMatches(URL u,IHttpService s) {
         if(s==null||!(u.getProtocol().equals("http")||u.getProtocol().equals("https"))||u.getUserInfo()!=null) return false;

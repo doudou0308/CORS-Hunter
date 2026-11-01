@@ -1,1 +1,2 @@
 8f35e0ce5649af2b2f01b77dc8a66cbb2d7177f65a22da7d223bd435711bf041  dist/CORS-Hunter-1.0.1.jar
+f60ae4117661dc6d000dc3cde9d2087c1aaaa7474861dc995ea272edcfd542fa  dist/CORS-Hunter-1.0.2.jar

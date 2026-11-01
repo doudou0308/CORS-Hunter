@@ -24,7 +24,10 @@ public final class BurpExtender implements IBurpExtender,IHttpListener,IContextM
     private final Semaphore uiSlots=new Semaphore(128);
     private final java.util.concurrent.atomic.AtomicInteger displayDropped=new java.util.concurrent.atomic.AtomicInteger();
     private final ThreadPoolExecutor files=new ThreadPoolExecutor(1,1,0,TimeUnit.SECONDS,new ArrayBlockingQueue<Runnable>(4),r->{Thread t=new Thread(r,"CORS-Hunter-file");t.setDaemon(true);return t;},new ThreadPoolExecutor.AbortPolicy());
-    private JLabel status,action;
+    private JLabel status,action,intake;
+    // EDT-owned; each entry holds one of the existing bounded uiSlots permits.
+    private final ArrayDeque<Finding> startupRows=new ArrayDeque<Finding>();
+    private boolean uiReady;
     private JTextField filter,originField;
     private JCheckBox onlySignals;
     private TableRowSorter<DefaultTableModel> sorter;
@@ -34,14 +37,18 @@ public final class BurpExtender implements IBurpExtender,IHttpListener,IContextM
     private JMenuItem manualMenu;
     private volatile IHttpRequestResponse[] contextMessages;
     public void registerExtenderCallbacks(IBurpExtenderCallbacks callbacks) {
-        cb=callbacks;cb.setExtensionName("CORS Hunter 1.0.1");
+        cb=callbacks;cb.setExtensionName("CORS Hunter 1.0.2");
         engine=new Engine(cb,this::append);
         cb.registerExtensionStateListener(this);
+        // Register synchronously: UI initialization must not create a gap in HTTP observation.
+        cb.registerHttpListener(this);
+        engine.log("HTTP listener registered; preparing UI");
         SwingUtilities.invokeLater(()->{
             if(engine.unloaded.get())return;
-            try{init();cb.addSuiteTab(this);cb.registerHttpListener(this);cb.registerContextMenuFactory(this);
-                cb.printOutput("CORS Hunter 1.0.1 loaded. Auto: in-scope GET/HEAD. Add targets to Target scope. Java legacy API; no Jython required.");}
-            catch(Exception e){engine.error(e);engine.close();}
+            try{init();cb.addSuiteTab(this);cb.registerContextMenuFactory(this);uiReady=true;
+                while(!startupRows.isEmpty())display(startupRows.removeFirst());
+                cb.printOutput("CORS Hunter 1.0.2 loaded. Auto: in-scope GET/HEAD. Add targets to Target scope. Java legacy API; no Jython required.");}
+            catch(Exception e){engine.error(e);engine.close();files.shutdown();cb.removeHttpListener(this);cb.removeContextMenuFactory(this);clearStartupRows();}
         });
     }
     private void init() {
@@ -98,10 +105,14 @@ public final class BurpExtender implements IBurpExtender,IHttpListener,IContextM
             editors.add(editor);details.addTab(new String[]{"Original","Probe","Preflight"}[kind]+(request?" Request":" Response"),editor.getComponent());
         }
         JSplitPane split=new JSplitPane(JSplitPane.VERTICAL_SPLIT,new JScrollPane(table),details);split.setResizeWeight(.50);panel.add(split,BorderLayout.CENTER);
-        status=new JLabel("Ready");action=new JLabel("请先在 Burp Target 中添加 scope；双击结果可送入 Repeater");
-        JPanel footer=new JPanel(new GridLayout(0,1));footer.add(status);footer.add(action);panel.add(footer,BorderLayout.SOUTH);
+        status=new JLabel("Ready");action=new JLabel("自动检测 Scope 内新响应；首次无结果时查看下面的 received / last");intake=new JLabel(engine.intakeStatus());
+        JPanel footer=new JPanel(new GridLayout(0,1));footer.add(status);footer.add(action);footer.add(intake);panel.add(footer,BorderLayout.SOUTH);
         cb.customizeUiComponent(panel);
-        timer=new javax.swing.Timer(1000,e->status.setText((engine.paused.get()?"PAUSED":"RUNNING")+" | sent="+engine.sent.get()+" queued="+engine.queued()+" active="+engine.active()+" contexts="+engine.tracked()+" rows="+rows.size()+" dropped="+(engine.dropped.get()+displayDropped.get())));timer.start();
+        timer=new javax.swing.Timer(1000,e->SwingUtilities.invokeLater(()->{
+            if(engine.unloaded.get())return;
+            status.setText((engine.paused.get()?"PAUSED":"RUNNING")+" | sent="+engine.sent.get()+" queued="+engine.queued()+" active="+engine.active()+" contexts="+engine.tracked()+" rows="+rows.size()+" dropped="+(engine.dropped.get()+displayDropped.get()));
+            intake.setText(engine.intakeStatus());intake.setToolTipText(engine.intakeDetails());
+        }));timer.start();
     }
     private static Message message(Finding f,int kind){return f==null?null:kind==0?f.original:kind==1?f.probe:f.preflight;}
     private Finding selection(){int view=table.getSelectedRow();if(view<0)return null;int row=table.convertRowIndexToModel(view);return row>=0&&row<rows.size()?rows.get(row):null;}
@@ -111,13 +122,17 @@ public final class BurpExtender implements IBurpExtender,IHttpListener,IContextM
     });});}
     private void append(Finding f) {
         if(!uiSlots.tryAcquire()){displayDropped.incrementAndGet();return;}
-        SwingUtilities.invokeLater(()->{try{if(engine.unloaded.get())return;if(rows.size()>=200){displayDropped.incrementAndGet();return;}rows.add(f);model.addRow(f.cells());}finally{uiSlots.release();}});
+        SwingUtilities.invokeLater(()->display(f));
     }
+    private void display(Finding f) {
+        if(!engine.unloaded.get()&&!uiReady){startupRows.addLast(f);return;}
+        try{if(engine.unloaded.get())return;if(rows.size()>=200){displayDropped.incrementAndGet();return;}rows.add(f);model.addRow(f.cells());}
+        finally{uiSlots.release();}
+    }
+    private void clearStartupRows(){while(!startupRows.isEmpty()){startupRows.removeFirst();uiSlots.release();}}
     private void note(String text,boolean alert){SwingUtilities.invokeLater(()->{if(engine.unloaded.get())return;action.setText(text);if(alert)JOptionPane.showMessageDialog(panel,text,"CORS Hunter",JOptionPane.WARNING_MESSAGE);});}
     public void processHttpMessage(int tool,boolean request,IHttpRequestResponse message) {
-        if(request||!engine.automatic||engine.unloaded.get()||engine.paused.get())return;
-        String result=engine.offer(message,false,false);
-        if(result.contains("失败"))engine.log(result);
+        engine.observe(tool,request,message);
     }
     public List<JMenuItem> createMenuItems(IContextMenuInvocation invocation) {
         if(engine.unloaded.get()||manualMenu==null)return null;
@@ -143,7 +158,7 @@ public final class BurpExtender implements IBurpExtender,IHttpListener,IContextM
     private void write(Path path,String text){try{files.execute(()->{try{Files.write(path,text.getBytes(StandardCharsets.UTF_8));note("已保存："+path.getFileName(),false);}catch(Exception e){engine.error(e);note("保存失败，查看 Errors",true);}});}catch(RejectedExecutionException e){note("文件任务繁忙或扩展已卸载",true);}}
     private void exportCsv(){Path path=choose(".csv");if(path==null)return;StringBuilder b=new StringBuilder("\ufeff");for(int i=-1;i<rows.size();i++){String[] values=i==-1?new String[]{"Method","URL","Rule","Origin","HTTP","Result","ACAO","ACAC","Reason"}:rows.get(i).cells();for(int j=0;j<values.length;j++){if(j>0)b.append(',');b.append(Policy.csv(values[j]));}b.append("\r\n");}write(path,b.toString());}
     private void exportPoc(){Finding f=selection();if(f==null){note("请先选中结果行",true);return;}Path path=choose(".html");if(path!=null)write(path,Poc.build(f,cb.getHelpers()));}
-    public void extensionUnloaded(){engine.close();files.shutdown();cb.removeHttpListener(this);cb.removeContextMenuFactory(this);SwingUtilities.invokeLater(()->{if(timer!=null)timer.stop();});}
+    public void extensionUnloaded(){engine.close();files.shutdown();cb.removeHttpListener(this);cb.removeContextMenuFactory(this);SwingUtilities.invokeLater(()->{if(timer!=null)timer.stop();clearStartupRows();});}
     public String getTabCaption(){return "CORS Hunter";}
     public Component getUiComponent(){return panel;}
 }

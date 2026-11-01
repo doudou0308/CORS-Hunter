@@ -1,19 +1,46 @@
 # CORS Hunter
 
-用于 Burp Suite 的 CORS 配置检测与人工复核扩展。根据代理流量生成独立探测请求，检查 Origin、凭证许可及必要的预检条件，并导出可在浏览器中操作的复核页面。
+**面向 Burp Suite 的 CORS 配置检测与浏览器复核扩展。**
 
-**当前版本：1.0.1。Java 扩展，使用 legacy Extender API，不需要 Jython。**
+从经过 Burp 的流量中生成独立探测请求，检查 Origin、凭证许可和必要的预检条件，再通过浏览器复核实际读取能力。
 
-- 默认只自动检测 Burp Scope 内的 GET/HEAD。
-- 支持随机 Origin、`null` Origin、可选域名边界规则及自定义 Origin。
-- 提供原始/探测/预检消息查看器、Repeater、CSV 和浏览器复核 HTML。
-- 不将 Origin 反射或 `ACAO: *` 直接等同于漏洞；自动 issue 为 `Information / Tentative`。
+![Version](https://img.shields.io/badge/version-1.0.1-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+![API](https://img.shields.io/badge/Burp_API-legacy_Extender-orange)
 
-目标环境为 **Burp Suite Professional 2025.7 / Java 24**。维护者已反馈在该环境加载及检测本地靶场成功，并完成浏览器跨 Origin 读取的正反例验证；这不代表所有功能或真实业务环境均已验收。自动化测试在 OpenJDK 17 上执行，扩展编译为 Java 8 字节码。
+**[下载插件 JAR](https://github.com/doudou0308/CORS-Hunter/raw/refs/heads/main/dist/CORS-Hunter-1.0.1.jar)** · **[下载完整项目 ZIP](https://github.com/doudou0308/CORS-Hunter/archive/refs/heads/main.zip)** · [校验文件](SHA256SUMS.txt) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/doudou0308/CORS-Hunter/issues)
 
-源码与讨论：[doudou0308/CORS-Hunter](https://github.com/doudou0308/CORS-Hunter)。安装文件为仓库中的 [`dist/CORS-Hunter-1.0.1.jar`](dist/CORS-Hunter-1.0.1.jar)，无需安装 API 依赖 JAR。
+[安装](#安装) · [控件说明](#控件) · [结果判读](#判定) · [本地靶场](#local-demo) · [源码构建](#源码与构建) · [常见问题](#常见问题) · [许可与来源](#许可与来源)
+
+## 功能概览
+
+| 功能 | 当前支持 |
+| --- | --- |
+| 自动检测 | 默认仅 Burp Scope 内的 GET/HEAD；保留原始消息，单独构造探测请求 |
+| Origin 规则 | 随机 Origin、`null`、可选域名前后缀及自定义 Origin |
+| 策略检查 | 精确匹配 ACAO/ACAC，识别重复 ACAO，并检查必要的 OPTIONS 预检 |
+| 探测控制 | 去重、防递归标记、有界队列、间隔与预算、失败冷却、暂停及手动重扫 |
+| 证据查看 | 原始、探测、预检共六个请求/响应查看器；支持发送到 Repeater |
+| 浏览器复核 | 导出本地 HTML，支持普通 fetch 和 null Origin sandbox，由用户点击发送 |
+| 结果整理 | 筛选、CSV 导出及 Information / Tentative issue |
+
+自动结果是待复核的策略信号。Origin 反射、`ACAO: *` 或 `CREDENTIAL_POLICY` 均不能单独证明敏感信息泄露；浏览器认证条件和数据敏感性仍需验证。
+
+## 版本与验证
+
+| 项目 | 说明 |
+| --- | --- |
+| 当前版本 | **1.0.1**；修复导航请求头引起的错误预检，增加 Navigation -> fetch 开关 |
+| 安装方式 | **Java 扩展，无需 Jython**；JAR 不包含 Burp API 类或第三方运行依赖 |
+| 本机反馈 | Burp Suite Professional 2025.7 / Java 24；本地 reflect 正例、strict 反例及携带测试 Cookie 的浏览器读取链路已反馈通过 |
+| 自动化验证 | OpenJDK 17 编译为 Java 8 字节码；83 个 Java 回归断言及导出页 JavaScript 模拟测试通过 |
+| 验证边界 | 本地同 site、跨 Origin 测试不代表跨 site Cookie 策略或所有真实业务均已验证；详见 [验证记录](TEST-REPORT.md) |
+
+首次使用建议按下方步骤安装，再运行[本地靶场](#local-demo)。只需安装插件时下载 JAR；需要靶场、测试和源码时下载完整项目 ZIP。
 
 ## 安装
+
+先[下载 CORS-Hunter-1.0.1.jar](https://github.com/doudou0308/CORS-Hunter/raw/refs/heads/main/dist/CORS-Hunter-1.0.1.jar)，然后：
 
 1. 停用旧 CORSScanner，以免两个插件同时重复请求。
 2. 打开 Burp **Extensions → Installed → Add**。
@@ -80,9 +107,11 @@
 
 Info issue 附原始、预检、探测消息。结果保留 HTTP 状态；非 2xx 的实际响应也可能符合头部条件，但默认不会为它生成 issue。CORS 协议条件通过不等于漏洞；公开数据、浏览器 Cookie 策略、未知的 Bearer Token 和业务条件都需要人工判断。
 
+<a id="local-demo"></a>
+
 ## 本地验收（推荐先做）
 
-需要 Python 3。先解压完整包，在其根目录运行：
+需要 Python 3。下载并解压完整项目 ZIP，进入含有 `README.md` 的项目目录后运行：
 
 ```powershell
 python demo\demo_server.py --api-port 18000 --page-port 18001

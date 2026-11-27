@@ -17,6 +17,22 @@ def run(args):
     subprocess.run(args, cwd=ROOT, check=True)
 
 
+def package_jar(out, jar):
+    """Write sorted class entries with fixed ZIP metadata."""
+    def add_entry(archive, name, data):
+        info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+        info.create_system = 3
+        info.external_attr = 0o100644 << 16
+        archive.writestr(info, data, compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
+
+    with zipfile.ZipFile(jar, 'w') as archive:
+        add_entry(archive, 'META-INF/MANIFEST.MF',
+                  b'Manifest-Version: 1.0\r\nImplementation-Title: CORS Hunter\r\nImplementation-Version: 1.0.1\r\n\r\n')
+        for package in ('burp', 'hunter'):
+            for file in sorted((out / package).rglob('*.class')):
+                add_entry(archive, file.relative_to(out).as_posix(), file.read_bytes())
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--test', action='store_true')
@@ -47,11 +63,7 @@ def main():
     dist = ROOT / 'dist'
     dist.mkdir(exist_ok=True)
     jar = dist / 'CORS-Hunter-1.0.1.jar'
-    with zipfile.ZipFile(jar, 'w', zipfile.ZIP_DEFLATED) as z:
-        z.writestr('META-INF/MANIFEST.MF', 'Manifest-Version: 1.0\r\nImplementation-Title: CORS Hunter\r\nImplementation-Version: 1.0.1\r\n\r\n')
-        for package in ('burp', 'hunter'):
-            for file in sorted((out / package).rglob('*.class')):
-                z.write(file, file.relative_to(out).as_posix())
+    package_jar(out, jar)
     print('Built:', jar)
     print('SHA256:', hashlib.sha256(jar.read_bytes()).hexdigest())
 
